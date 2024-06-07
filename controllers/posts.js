@@ -1,4 +1,5 @@
 const { PrismaClient } = require("@prisma/client");
+const errorHandler = require("../middlewares/errorHandler.js");
 const prisma = new PrismaClient();
 
 const generateSlug = (title) => {
@@ -9,17 +10,40 @@ const generateSlug = (title) => {
 };
 
 const store = async (req, res) => {
-  const { title, content } = req.body;
+  const { title, content, categoryId, tags, img } = req.body;
   const slug = generateSlug(title);
+  if (categoryId) {
+    const categoryExists = await prisma.category.findUnique({
+      where: { id: categoryId },
+    });
+
+    if (!categoryExists) {
+      return res.status(400).send("Categoria non valida.");
+    }
+  }
 
   const data = {
     title,
     slug,
     content,
+    img,
     published: req.body.published ? true : false,
+    tags: {
+      connect: tags.map((id) => ({ id })),
+    },
   };
+
+  if (categoryId) {
+    data.categoryId = categoryId;
+  }
+
   try {
-    const post = await prisma.post.create({ data });
+    const post = await prisma.post.create({
+      data,
+      include: {
+        tags: true,
+      },
+    });
     res.status(200).send(post);
   } catch (error) {
     console.error("Qualcosa è andato storto", error);
@@ -29,13 +53,20 @@ const store = async (req, res) => {
 
 const index = async (req, res) => {
   try {
-    const { published } = req.query;
+    const { published, search } = req.query;
     const where = {};
 
     if (published === "true") {
       where.published = true;
     } else if (published === "false") {
       where.published = false;
+    }
+
+    if (search) {
+      where.OR = [
+        { title: { contains: search, mode: "insensitive" } },
+        { content: { contains: search, mode: "insensitive" } },
+      ];
     }
 
     const { page = 1, limit = 5 } = req.query;
@@ -54,17 +85,29 @@ const index = async (req, res) => {
       where,
       take: parseInt(limit),
       skip: parseInt(offset),
+      include: {
+        _count: {
+          select: {
+            tags: true,
+          },
+        },
+        tags: true,
+        category: true,
+      },
     });
 
     res.json({
-      data: posts,
+      data: posts.map((p) => ({
+        ...p,
+        totalTags: p._count.tags,
+        _count: undefined,
+      })),
       page: parseInt(page),
       totalItems,
       totalPages,
     });
-  } catch (error) {
-    console.error("Qualcosa è andato storto", error);
-    res.status(500).send("Errore durante il recupero dei post");
+  } catch (err) {
+    errorHandler(err, req, res);
   }
 };
 
@@ -73,6 +116,14 @@ const show = async (req, res) => {
     const { slug } = req.params;
     const post = await prisma.post.findUnique({
       where: { slug },
+      include: {
+        category: {
+          select: {
+            name: true,
+          },
+        },
+        tags: true,
+      },
     });
     if (post) {
       res.json(post);
@@ -88,7 +139,18 @@ const show = async (req, res) => {
 const update = async (req, res) => {
   try {
     const { slug } = req.params;
-    const postData = req.body;
+    const { title, content, categoryId, tags } = req.body;
+    const data = {
+      title,
+      content,
+      published: req.body.available ? true : false,
+      tags: {
+        set: published.map((id) => ({ id })),
+      },
+    };
+    if (categoryId) {
+      data.categoryId = categoryId;
+    }
 
     if (postData.title) {
       const newSlug = generateSlug(postData.title);
@@ -101,19 +163,20 @@ const update = async (req, res) => {
 
     res.json(updatedPost);
   } catch (err) {
-    console.error("Qualcosa è andato storto", err);
-    res.status(500).send("Errore durante la modifica del post");
+    errorHandler(err, req, res);
   }
 };
 
-module.exports = { update };
-
 const destroy = async (req, res) => {
-  const { slug } = req.params;
-  await prisma.post.delete({
-    where: { slug },
-  });
-  res.json(`Post con slug ${slug} eliminato con successo.`);
+  try {
+    const { slug } = req.params;
+    await prisma.post.delete({
+      where: { slug },
+    });
+    res.json(`Post con slug ${slug} eliminato con successo.`);
+  } catch (err) {
+    errorHandler(err, req, res);
+  }
 };
 
 module.exports = { store, index, show, update, destroy };
